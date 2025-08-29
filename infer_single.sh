@@ -1,0 +1,17 @@
+CUDA_VISIBLE_DEVICES=6 python infer.py \
+--portrait_checkpoint "./models/fantasyportrait_model.ckpt" \
+--alignment_model_path "./models/face_landmark.onnx" \
+--det_model_path "./models/face_det.onnx" \
+--pd_fpg_model_path "./models/pd_fpg.pth" \
+--wan_model_path "./models/Wan2.1-I2V-14B-720P" \
+--output_path ./outputs/ \
+--input_image_path "./assert/man.jpeg" \
+--driven_video_path "./assert/jgz.mp4" \
+--prompt "" \
+--scale_image True \
+--max_size 720 \
+--num_frames 201 \
+--cfg_scale 1.0 \
+--portrait_scale 1.0 \
+--portrait_cfg_scale 4.0 \
+--seed 42
