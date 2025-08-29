@@ -259,7 +259,7 @@ class Model:
             "--scale_image", "True",
             # Reduce resolution and frames to lower VRAM usage
             "--max_size", "512",
-            "--num_frames", "121",
+            "--num_frames", "81",
             "--cfg_scale", "1.0",
             "--portrait_scale", "1.0",
             "--portrait_cfg_scale", "4.0",

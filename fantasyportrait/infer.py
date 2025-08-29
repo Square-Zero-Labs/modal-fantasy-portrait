@@ -264,9 +264,11 @@ def load_wan_video():
     pipe = WanVideoPipeline.from_model_manager(
         model_manager, torch_dtype=torch.bfloat16, device="cuda"
     )
+    # Aggressively offload DiT weights to reduce resident VRAM. This slows down
+    # compute but helps avoid OOM on smaller GPUs.
     pipe.enable_vram_management(
-        num_persistent_param_in_dit=None
-    )  # You can set `num_persistent_param_in_dit` to a small number to reduce VRAM required.
+        num_persistent_param_in_dit=0
+    )  # Keep 0 persistent params on GPU; spill others and on-demand load.
     return pipe
 
 
