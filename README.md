@@ -48,6 +48,17 @@ modal deploy app.py
 
 Modal builds a container image, downloads the models, and exposes an API for inference.
 
+## Authentication
+
+The API requires proxy authentication tokens.
+
+To create proxy auth tokens, go to your Modal workspace settings and generate a new token. Set the token ID and secret as environment variables:
+
+```bash
+export TOKEN_ID="your-token-id"
+export TOKEN_SECRET="your-token-secret"
+```
+
 ## Usage
 
 ### 1. Web API Endpoint
@@ -94,9 +105,8 @@ curl -X GET \
 ### 2. Local Testing CLI
 
 ```bash
-modal run app.py --image-path "https://example.com/face.jpg" \
-  --driven-video-path "https://example.com/driver.mp4" \
-  --prompt "smiling portrait" \
+modal run app.py --image-path "https://storage.googleapis.com/4public-testing-files4200/teddy-bear-smiling-small.png"\
+  --driven-video-path "https://storage.googleapis.com/4public-testing-files4200/breakfast-club-with-driving-video.mp4"\
   --output-path outputs/demo.mp4
 ```
 

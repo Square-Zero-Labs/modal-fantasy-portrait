@@ -29,7 +29,11 @@ image = (
     # Use the official PyTorch development image which includes nvcc for compiling flash-attn
     modal.Image.from_registry("pytorch/pytorch:2.4.1-cuda12.1-cudnn9-devel")
     # Set environment variable to prevent download timeouts
-    .env({"HF_HUB_ETAG_TIMEOUT": "60"})
+    .env({
+        "HF_HUB_ETAG_TIMEOUT": "60",
+        # Help avoid CUDA memory fragmentation on long runs
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+    })
     # Mount the local FantasyPortrait directory into the container.
     # copy=True is required because we run pip install from this directory later.
     .add_local_dir("fantasyportrait", "/root/fantasyportrait", copy=True)
@@ -41,6 +45,10 @@ image = (
         "packaging",
         "flash_attn==2.7.4.post1",
         # Install other core dependencies
+        "fastapi[standard]",  # Required for Modal web endpoints
+        "opencv-python-headless",  # infer.py depends on cv2
+        "onnx",  # required by fantasyportrait/diffsynth/models/face_utils.py
+        "onnxruntime",  # CPU provider is used (gpu_id=None)
         "pydantic",
         "python-magic",
         "huggingface_hub",
@@ -249,14 +257,32 @@ class Model:
             "--driven_video_path", driven_video_path,
             "--prompt", prompt or "",
             "--scale_image", "True",
-            "--max_size", "720",
-            "--num_frames", "201",
+            # Reduce resolution and frames to lower VRAM usage
+            "--max_size", "512",
+            "--num_frames", "121",
             "--cfg_scale", "1.0",
             "--portrait_scale", "1.0",
             "--portrait_cfg_scale", "4.0",
             "--seed", "42",
         ]
-        subprocess.run(cmd, check=True)
+        try:
+            completed = subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            if completed.stdout:
+                print(completed.stdout)
+            if completed.stderr:
+                print(completed.stderr)
+        except subprocess.CalledProcessError as e:
+            print("--- infer.py failed ---")
+            print("STDOUT:\n" + (e.stdout or ""))
+            print("STDERR:\n" + (e.stderr or ""))
+            raise RuntimeError(
+                f"infer.py failed with exit code {e.returncode}. See logs above."
+            )
 
         new_files = set(output_dir.glob("*.mp4")) - prev_files
         if not new_files:
