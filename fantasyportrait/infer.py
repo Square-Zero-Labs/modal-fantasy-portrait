@@ -44,6 +44,11 @@ def get_emo_feature(
         ret, frame = cap.read()
     cap.release()
 
+    # Apply sliding window start
+    start = max(0, int(args.start_frame)) if hasattr(args, "start_frame") else 0
+    if start > 0:
+        frame_list = frame_list[start:]
+
     num_frames = min(len(frame_list), args.num_frames)
     num_frames = find_replacement(num_frames)
     frame_list = frame_list[:num_frames]
@@ -208,6 +213,25 @@ def parse_args():
         required=True,
         help="The driven video path.",
     )
+    parser.add_argument(
+        "--no_audio_merge",
+        action="store_true",
+        help="Skip merging audio (useful for segmented generation).",
+    )
+    parser.add_argument(
+        "--start_frame",
+        type=int,
+        default=0,
+        required=False,
+        help="Start frame index for sliding window (0-based).",
+    )
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=None,
+        required=False,
+        help="Override output FPS (e.g., 25).",
+    )
 
     args = parser.parse_args()
     return args
@@ -358,14 +382,16 @@ save_video_name = (
 )
 save_name = f"{timestamp_str}_{save_image_name}_{save_video_name}"
 save_video_path = os.path.join(args.output_path, f"{save_name}.mp4")
+out_fps = args.fps if hasattr(args, "fps") and args.fps is not None else fps
 save_video(
-    video_audio, os.path.join(args.output_path, f"{save_name}.mp4"), fps=fps, quality=5
+    video_audio, os.path.join(args.output_path, f"{save_name}.mp4"), fps=out_fps, quality=5
 )
 
-# add Driven Audio to the Result video.
+# add Driven Audio to the Result video unless disabled for segment runs.
 save_video_path_with_audio = os.path.join(
     args.output_path, f"{save_name}_with_audio.mp4"
 )
-merge_audio_to_video(
-    args.driven_video_path, save_video_path, save_video_path_with_audio
-)
+if not hasattr(args, "no_audio_merge") or not args.no_audio_merge:
+    merge_audio_to_video(
+        args.driven_video_path, save_video_path, save_video_path_with_audio
+    )
