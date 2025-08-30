@@ -11,6 +11,9 @@ import torch
 from PIL import Image
 
 from diffsynth import ModelManager, WanVideoPipeline
+from diffsynth.models.wan_video_dit import WanModel
+from diffsynth.models.utils import load_state_dict, init_weights_on_device
+from diffsynth.fp8_runtime import convert_fp8_linear
 from diffsynth.data import save_video
 from diffsynth.models.camer import CameraDemo
 from diffsynth.models.face_align import FaceAlignment
@@ -218,39 +221,56 @@ args = parse_args()
 
 def load_wan_video():
     # Load models
-    model_manager = ModelManager(device="cpu")
+    import os
+    model_manager = ModelManager(device="cpu", torch_dtype=torch.bfloat16)
+
+    # Expect exactly one consolidated Kijai fp8 file; do not fallback
+    dit_fp8_path = os.path.join(
+        args.wan_model_path,
+        "Wan2_1-I2V-14B-720p_fp8_e4m3fn_scaled_KJ.safetensors",
+    )
+    if not os.path.exists(dit_fp8_path):
+        raise FileNotFoundError(
+            "Required Kijai fp8 file missing: "
+            f"{dit_fp8_path}. Ensure app initialization downloaded this file."
+        )
+    print(f"Using Kijai fp8 DiT weights: {dit_fp8_path}")
+
+    # 1) Load DiT explicitly as WanModel with known I2V-14B config, keeping FP8 weights
+    dit_state_dict = load_state_dict(dit_fp8_path)
+    dit_config = dict(
+        model_type="i2v",
+        patch_size=(1, 2, 2),
+        text_len=512,
+        in_dim=36,
+        dim=5120,
+        ffn_dim=13824,
+        freq_dim=256,
+        text_dim=4096,
+        out_dim=16,
+        num_heads=40,
+        num_layers=40,
+        window_size=(-1, -1),
+        qk_norm=True,
+        cross_attn_norm=True,
+        eps=1e-6,
+    )
+    with init_weights_on_device():
+        dit_model = WanModel(**dit_config).eval()
+    # Attach fp8 weights (remain fp8) and patch Linear layers for scaled mm in bf16 compute
+    dit_model.load_state_dict(dit_state_dict, assign=True, strict=False)
+    # Collect per-layer scales if present in checkpoint (keys end with .scale_weight)
+    scale_map = {k: v for k, v in dit_state_dict.items() if isinstance(k, str) and k.endswith(".scale_weight")}
+    convert_fp8_linear(dit_model, base_dtype=torch.bfloat16, scale_weight_map=scale_map)
+    # Keep model parameters in original dtypes (fp8 weights), place on CPU initially
+    dit_model = dit_model.to(device="cpu")
+    model_manager.model.append(dit_model)
+    model_manager.model_path.append(dit_fp8_path)
+    model_manager.model_name.append("wan_video_dit")
+
+    # 2) Load image encoder, text encoder, and VAE as BF16
     model_manager.load_models(
         [
-            [
-                os.path.join(
-                    args.wan_model_path,
-                    "diffusion_pytorch_model-00001-of-00007.safetensors",
-                ),
-                os.path.join(
-                    args.wan_model_path,
-                    "diffusion_pytorch_model-00002-of-00007.safetensors",
-                ),
-                os.path.join(
-                    args.wan_model_path,
-                    "diffusion_pytorch_model-00003-of-00007.safetensors",
-                ),
-                os.path.join(
-                    args.wan_model_path,
-                    "diffusion_pytorch_model-00004-of-00007.safetensors",
-                ),
-                os.path.join(
-                    args.wan_model_path,
-                    "diffusion_pytorch_model-00005-of-00007.safetensors",
-                ),
-                os.path.join(
-                    args.wan_model_path,
-                    "diffusion_pytorch_model-00006-of-00007.safetensors",
-                ),
-                os.path.join(
-                    args.wan_model_path,
-                    "diffusion_pytorch_model-00007-of-00007.safetensors",
-                ),
-            ],
             os.path.join(
                 args.wan_model_path,
                 "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
@@ -258,8 +278,7 @@ def load_wan_video():
             os.path.join(args.wan_model_path, "models_t5_umt5-xxl-enc-bf16.pth"),
             os.path.join(args.wan_model_path, "Wan2.1_VAE.pth"),
         ],
-        # torch_dtype=torch.float8_e4m3fn, # You can set `torch_dtype=torch.bfloat16` to disable FP8 quantization.
-        torch_dtype=torch.bfloat16,  # You can set `torch_dtype=torch.bfloat16` to disable FP8 quantization.
+        torch_dtype=torch.bfloat16,
     )
     pipe = WanVideoPipeline.from_model_manager(
         model_manager, torch_dtype=torch.bfloat16, device="cuda"

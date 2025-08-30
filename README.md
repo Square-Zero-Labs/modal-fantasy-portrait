@@ -108,7 +108,7 @@ curl -X GET \
 modal run app.py --image-path "https://storage.googleapis.com/4public-testing-files4200/teddy-bear-smiling-small.png"\
   --driven-video-path "https://storage.googleapis.com/4public-testing-files4200/breakfast-club-with-driving-video.mp4"\
   --prompt "The bear is talking"\
-  --output-path outputs/demo.mp4
+  --output-path outputs/demo2.mp4
 ```
 
 ## Resources

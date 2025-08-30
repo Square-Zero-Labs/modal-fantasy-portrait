@@ -165,24 +165,76 @@ class Model:
                 print(f"--- {description} already present ---")
                 return
             print(f"--- Downloading {description}... ---")
-            hf_hub_download(repo_id=repo_id, filename=filename, local_dir=local_path.parent)
+            # Ensure destination directory exists
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            downloaded_path = hf_hub_download(
+                repo_id=repo_id,
+                filename=filename,
+                local_dir=local_path.parent,
+            )
+            # Move/rename to exact expected location if hub created nested dirs
+            try:
+                if Path(downloaded_path) != local_path:
+                    import shutil
+                    shutil.move(downloaded_path, local_path)
+            except Exception as _e:
+                # Best-effort move; if already correct, ignore
+                pass
             print(f"--- {description} downloaded successfully ---")
 
-        def download_repo(repo_id: str, local_dir: Path, check_file: str, description: str) -> None:
+        def download_repo(repo_id: str, local_dir: Path, check_file: str, description: str, allow_patterns: list[str] | None = None) -> None:
             check_path = local_dir / check_file
             if check_path.exists():
                 print(f"--- {description} already present ---")
                 return
             print(f"--- Downloading {description}... ---")
-            snapshot_download(repo_id=repo_id, local_dir=local_dir)
+            snapshot_download(repo_id=repo_id, local_dir=local_dir, allow_patterns=allow_patterns)
             print(f"--- {description} downloaded successfully ---")
 
         try:
-            download_repo(
+            # 1) Download ONLY the single Kijai fp8_scaled DiT file (e4m3fn variant)
+            kijai_root = model_root / "Wan2.1-I2V-14B-720P"
+            kijai_i2v_dir = kijai_root / "I2V"
+            kijai_single = kijai_i2v_dir / "Wan2_1-I2V-14B-720p_fp8_e4m3fn_scaled_KJ.safetensors"
+            download_file(
+                "Kijai/WanVideo_comfy_fp8_scaled",
+                "I2V/Wan2_1-I2V-14B-720p_fp8_e4m3fn_scaled_KJ.safetensors",
+                kijai_single,
+                "Kijai fp8_e4m3fn_scaled DiT (single file)",
+            )
+
+            # 2) Download remaining required files from the official Wan 2.1 repo into the same I2V directory
+            #    - models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth
+            #    - models_t5_umt5-xxl-enc-bf16.pth
+            #    - Wan2.1_VAE.pth
+            #    - google/umt5-xxl/spiece.model
+            kijai_i2v_dir.mkdir(parents=True, exist_ok=True)
+            download_file(
                 "Wan-AI/Wan2.1-I2V-14B-720P",
-                model_root / "Wan2.1-I2V-14B-720P",
-                "model_index.json",
-                "Wan2.1 base model",
+                "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
+                kijai_i2v_dir / "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
+                "Wan2.1 CLIP image encoder",
+            )
+            download_file(
+                "Wan-AI/Wan2.1-I2V-14B-720P",
+                "models_t5_umt5-xxl-enc-bf16.pth",
+                kijai_i2v_dir / "models_t5_umt5-xxl-enc-bf16.pth",
+                "Wan2.1 T5 encoder (umt5-xxl)",
+            )
+            download_file(
+                "Wan-AI/Wan2.1-I2V-14B-720P",
+                "Wan2.1_VAE.pth",
+                kijai_i2v_dir / "Wan2.1_VAE.pth",
+                "Wan2.1 VAE",
+            )
+            # Tokenizer file is nested under google/umt5-xxl/spiece.model
+            tokenizer_local = kijai_i2v_dir / "google" / "umt5-xxl" / "spiece.model"
+            tokenizer_local.parent.mkdir(parents=True, exist_ok=True)
+            download_file(
+                "Wan-AI/Wan2.1-I2V-14B-720P",
+                "google/umt5-xxl/spiece.model",
+                tokenizer_local,
+                "umt5-xxl tokenizer (spiece.model)",
             )
             download_file(
                 "acvlab/FantasyPortrait",
@@ -246,19 +298,20 @@ class Model:
         prev_files = set(output_dir.glob("*.mp4"))
 
         cmd = [
-            "python", "/root/fantasyportrait/infer.py",
+            "python", "-u", "/root/fantasyportrait/infer.py",
             "--portrait_checkpoint", str(model_root / "fantasyportrait_model.ckpt"),
             "--alignment_model_path", str(model_root / "face_landmark.onnx"),
             "--det_model_path", str(model_root / "face_det.onnx"),
             "--pd_fpg_model_path", str(model_root / "pd_fpg.pth"),
-            "--wan_model_path", str(model_root / "Wan2.1-I2V-14B-720P"),
+            # Point to the I2V subfolder that holds Kijai fp8 shards and Wan-2.1 auxiliaries
+            "--wan_model_path", str(model_root / "Wan2.1-I2V-14B-720P" / "I2V"),
             "--output_path", str(output_dir),
             "--input_image_path", image_path,
             "--driven_video_path", driven_video_path,
             "--prompt", prompt or "",
             "--scale_image", "True",
             # Reduce resolution and frames to lower VRAM usage
-            "--max_size", "512",
+            "--max_size", "480",
             "--num_frames", "81",
             "--cfg_scale", "1.0",
             "--portrait_scale", "1.0",
@@ -266,20 +319,13 @@ class Model:
             "--seed", "42",
         ]
         try:
-            completed = subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            if completed.stdout:
-                print(completed.stdout)
-            if completed.stderr:
-                print(completed.stderr)
+            print("--- Launching infer.py (streaming logs) ---")
+            # Stream logs live so progress is visible during long runs
+            completed = subprocess.run(cmd, check=True)
         except subprocess.CalledProcessError as e:
             print("--- infer.py failed ---")
-            print("STDOUT:\n" + (e.stdout or ""))
-            print("STDERR:\n" + (e.stderr or ""))
+            # We didn't capture output; advise checking Modal logs for details
+            print("See live logs above for details.")
             raise RuntimeError(
                 f"infer.py failed with exit code {e.returncode}. See logs above."
             )
