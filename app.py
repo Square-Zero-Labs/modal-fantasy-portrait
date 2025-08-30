@@ -246,7 +246,7 @@ class Model:
         prev_files = set(output_dir.glob("*.mp4"))
 
         cmd = [
-            "python", "/root/fantasyportrait/infer.py",
+            "python", "-u", "/root/fantasyportrait/infer.py",
             "--portrait_checkpoint", str(model_root / "fantasyportrait_model.ckpt"),
             "--alignment_model_path", str(model_root / "face_landmark.onnx"),
             "--det_model_path", str(model_root / "face_det.onnx"),
@@ -266,20 +266,12 @@ class Model:
             "--seed", "42",
         ]
         try:
-            completed = subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            if completed.stdout:
-                print(completed.stdout)
-            if completed.stderr:
-                print(completed.stderr)
+            print("--- Launching infer.py (streaming logs) ---")
+            # Stream logs live so progress is visible during long runs
+            subprocess.run(cmd, check=True)
         except subprocess.CalledProcessError as e:
             print("--- infer.py failed ---")
-            print("STDOUT:\n" + (e.stdout or ""))
-            print("STDERR:\n" + (e.stderr or ""))
+            print("See live logs above for details.")
             raise RuntimeError(
                 f"infer.py failed with exit code {e.returncode}. See logs above."
             )
