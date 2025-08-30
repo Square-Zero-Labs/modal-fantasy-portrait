@@ -258,7 +258,7 @@ class Model:
             "--prompt", prompt or "",
             "--scale_image", "True",
             # Reduce resolution and frames to lower VRAM usage
-            "--max_size", "512",
+            "--max_size", "480",
             "--num_frames", "81",
             "--cfg_scale", "1.0",
             "--portrait_scale", "1.0",

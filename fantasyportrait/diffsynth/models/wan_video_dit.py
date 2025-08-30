@@ -30,6 +30,9 @@ except ModuleNotFoundError:
 
 import warnings
 
+# One-time backend logging flag for flash_attention()
+_FLASH_BACKEND_LOGGED = False
+
 __all__ = ["WanModel"]
 
 
@@ -103,8 +106,12 @@ def flash_attention(
         )
 
     # apply attention
+    global _FLASH_BACKEND_LOGGED
     if (version is None or version == 3) and FLASH_ATTN_3_AVAILABLE:
         # Note: dropout_p, window_size are not supported in FA3 now.
+        if not _FLASH_BACKEND_LOGGED:
+            print("[wan_video] Attention backend: FlashAttention 3")
+            _FLASH_BACKEND_LOGGED = True
         x = flash_attn_interface.flash_attn_varlen_func(
             q=q,
             k=k,
@@ -124,6 +131,9 @@ def flash_attention(
             deterministic=deterministic,
         )[0].unflatten(0, (b, lq))
     elif FLASH_ATTN_2_AVAILABLE:
+        if not _FLASH_BACKEND_LOGGED:
+            print("[wan_video] Attention backend: FlashAttention 2")
+            _FLASH_BACKEND_LOGGED = True
         x = flash_attn.flash_attn_varlen_func(
             q=q,
             k=k,
@@ -143,12 +153,18 @@ def flash_attention(
             deterministic=deterministic,
         ).unflatten(0, (b, lq))
     elif SAGE_ATTN_AVAILABLE:
+        if not _FLASH_BACKEND_LOGGED:
+            print("[wan_video] Attention backend: SageAttention")
+            _FLASH_BACKEND_LOGGED = True
         q = q.unsqueeze(0).transpose(1, 2).to(dtype)
         k = k.unsqueeze(0).transpose(1, 2).to(dtype)
         v = v.unsqueeze(0).transpose(1, 2).to(dtype)
         x = sageattn(q, k, v, dropout_p=dropout_p, is_causal=causal)
         x = x.transpose(1, 2).contiguous()
     else:
+        if not _FLASH_BACKEND_LOGGED:
+            print("[wan_video] Attention backend: PyTorch SDPA")
+            _FLASH_BACKEND_LOGGED = True
         q = q.unsqueeze(0).transpose(1, 2).to(dtype)
         k = k.unsqueeze(0).transpose(1, 2).to(dtype)
         v = v.unsqueeze(0).transpose(1, 2).to(dtype)
