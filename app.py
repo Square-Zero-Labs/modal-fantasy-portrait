@@ -119,7 +119,7 @@ class API:
 
 # --- GPU Model Class ---
 @app.cls(
-    gpu="L40S",
+    gpu="A100-80GB",
     enable_memory_snapshot=True, # new gpu snapshot feature: https://modal.com/blog/gpu-mem-snapshots
     experimental_options={"enable_gpu_snapshot": True},
     image=image,
@@ -245,6 +245,20 @@ class Model:
         output_dir = Path(OUTPUT_DIR)
         prev_files = set(output_dir.glob("*.mp4"))
 
+        # Determine frame count from the driven video, capped at 250
+        try:
+            import cv2
+            cap = cv2.VideoCapture(driven_video_path)
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            cap.release()
+        except Exception:
+            frame_count = 0
+        # Cap frames to keep VRAM in check; README multi example uses ~201 frames
+        max_frames = 250
+        requested_frames = frame_count if frame_count and frame_count > 0 else max_frames
+        requested_frames = min(requested_frames, max_frames)
+        print(f"--- Driven video frames detected: {frame_count} -> using {requested_frames} ---")
+
         cmd = [
             "python", "-u", "/root/fantasyportrait/infer.py",
             "--portrait_checkpoint", str(model_root / "fantasyportrait_model.ckpt"),
@@ -259,7 +273,7 @@ class Model:
             "--scale_image", "True",
             # Reduce resolution and frames to lower VRAM usage
             "--max_size", "480",
-            "--num_frames", "81",
+            "--num_frames", str(requested_frames),
             "--cfg_scale", "1.0",
             "--portrait_scale", "1.0",
             "--portrait_cfg_scale", "4.0",
