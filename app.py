@@ -270,7 +270,7 @@ class Model:
 
         # Sliding window parameters
         WINDOW_LEN = 117
-        OVERLAP = 17
+        OVERLAP = 33
 
         def run_infer_segment(start_frame: int, seg_len: int) -> str:
             prev = set(output_dir.glob("*.mp4"))
@@ -309,15 +309,77 @@ class Model:
         if frame_count and frame_count > WINDOW_LEN:
             from fantasyportrait.sliding_window import compute_segments, concat_no_blend
             segments = compute_segments(frame_count, WINDOW_LEN, OVERLAP)
+            # Determine coverage range for noise generation across segments
+            if segments:
+                pre_start = segments[0][0]
+                pre_end = segments[-1][0] + segments[-1][1]
+            else:
+                pre_start, pre_end = 0, frame_count
+            # Precompute global noise for continuity and slice per window
+            from PIL import Image as _PILImage
+            src_img = _PILImage.open(image_path).convert("RGB")
+            w0, h0 = src_img.size
+            scale = 480 / max(w0, h0)
+            w = int(w0 * scale)
+            h = int(h0 * scale)
+            last_end = pre_end
+            import torch as _torch
+            gen = _torch.Generator().manual_seed(42)
+            T_lat = (int(last_end) - 1) // 4 + 1
+            noise_full = _torch.randn((1, 16, T_lat, h // 8, w // 8), generator=gen, dtype=_torch.float32)
+            noise_path = output_dir / f"noise_{uuid.uuid4().hex}.pt"
+            _torch.save(noise_full, str(noise_path))
             # Enforce a maximum number of windows to bound runtime
             MAX_WINDOWS = 3
             if len(segments) > MAX_WINDOWS:
                 print(f"--- Too many windows ({len(segments)}). Limiting to first {MAX_WINDOWS}. ---")
                 segments = segments[:MAX_WINDOWS]
             print(f"--- Using sliding windows: {segments} ---")
-            for s, l in segments:
-                seg_path = run_infer_segment(s, l)
+            last_init_latents_path = None
+            for idx, (s, l) in enumerate(segments):
+                prev = set(output_dir.glob("*.mp4"))
+                cmd = [
+                    "python", "-u", "/root/fantasyportrait/infer.py",
+                    "--portrait_checkpoint", str(model_root / "fantasyportrait_model.ckpt"),
+                    "--alignment_model_path", str(model_root / "face_landmark.onnx"),
+                    "--det_model_path", str(model_root / "face_det.onnx"),
+                    "--pd_fpg_model_path", str(model_root / "pd_fpg.pth"),
+                    "--wan_model_path", str(model_root / "Wan2.1-I2V-14B-720P"),
+                    "--output_path", str(output_dir),
+                    "--input_image_path", image_path,
+                    "--driven_video_path", driven_video_path,
+                    "--fps", str(int(src_fps)),
+                    "--start_frame", str(s),
+                    "--prompt", prompt or "",
+                    "--scale_image", "True",
+                    "--max_size", "480",
+                    "--num_frames", str(l),
+                    "--cfg_scale", "1.0",
+                    "--portrait_scale", "1.0",
+                    "--portrait_cfg_scale", "4.0",
+                    "--seed", "42",
+                    "--no_audio_merge",
+                    "--noise_path", str(noise_path),
+                ]
+                if idx > 0 and last_init_latents_path:
+                    cmd += [
+                        "--warm_video_path", str(segment_paths[-1]),
+                        "--warm_overlap", str(OVERLAP),
+                        "--init_latents_path", str(last_init_latents_path),
+                        "--init_latents_overlap", str(OVERLAP),
+                    ]
+                # Save init latents for next window
+                init_latents_path = output_dir / f"init_lat_{uuid.uuid4().hex}.pt"
+                cmd += ["--save_init_latents_path", str(init_latents_path)]
+                label = "warm-start" if idx > 0 else "start"
+                print(f"--- Launching segment ({label}): start={s}, len={l} ---")
+                subprocess.run(cmd, check=True)
+                new = set(output_dir.glob("*.mp4")) - prev
+                if not new:
+                    raise RuntimeError("Segment generation failed")
+                seg_path = str(max(new, key=lambda p: p.stat().st_mtime))
                 segment_paths.append(seg_path)
+                last_init_latents_path = str(init_latents_path)
             stitched_path = output_dir / f"stitched_{uuid.uuid4().hex}.mp4"
             final_video_path = concat_no_blend(segment_paths, OVERLAP, int(src_fps), str(stitched_path))
             # Merge original audio onto stitched video
