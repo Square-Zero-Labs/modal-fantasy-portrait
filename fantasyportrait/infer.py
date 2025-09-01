@@ -235,6 +235,24 @@ def parse_args():
         help="If set, saves this window's initial latents (post add_noise) to the given .pt path.",
     )
     parser.add_argument(
+        "--adapter_tail_path",
+        type=str,
+        default=None,
+        help="Optional path to previous window's adapter tail (.pt) for overlap blending.",
+    )
+    parser.add_argument(
+        "--save_adapter_tail_path",
+        type=str,
+        default=None,
+        help="If set, saves this window's adapter tail (last overlap latents) to the given .pt path.",
+    )
+    parser.add_argument(
+        "--overlap_noise",
+        type=float,
+        default=0.0,
+        help="Noise factor (0..1e-1) to inject into overlap latents to reduce blur.",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -440,6 +458,23 @@ proj_split, context_lens = portrait_model.split_tensor_with_padding(
     adapter_proj, pos_idx_range, expand_length=0
 )
 
+# Blend adapter tail from previous window, if provided
+if args.adapter_tail_path and args.init_latents_overlap > 0:
+    try:
+        prev_adapter_tail = torch.load(args.adapter_tail_path, map_location="cpu")  # expected [1, T_lat_tail, L, C]
+        if prev_adapter_tail.dim() == 3:
+            prev_adapter_tail = prev_adapter_tail.unsqueeze(0)
+        t_head_lat = (int(args.init_latents_overlap) - 1) // 4 + 1
+        t_head_lat = min(t_head_lat, proj_split.shape[1], prev_adapter_tail.shape[1])
+        if t_head_lat > 0:
+            w = torch.hann_window(2 * t_head_lat, periodic=False)[:t_head_lat].flip(0).view(1, t_head_lat, 1, 1)
+            curr_head = proj_split[:, :t_head_lat].cpu()
+            blended = prev_adapter_tail[:, -t_head_lat:] * w + curr_head * (1 - w)
+            proj_split[:, :t_head_lat] = blended.to(proj_split.device, dtype=proj_split.dtype)
+            print(f"[infer] adapter blend: prev_tail={tuple(prev_adapter_tail.shape)} head={tuple(curr_head.shape)} t_head_lat={t_head_lat}")
+    except Exception as e:
+        print(f"[infer] adapter blend skipped: {e}")
+
 negative_prompt = "人物静止不动，静止，色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
 init_head_video = None
 if args.warm_video_path and args.warm_overlap > 0:
@@ -488,6 +523,7 @@ result = pipe(
     latents_num_frames=(num_frames - 1) // 4 + 1,
     init_noise=init_noise_slice,
     init_latents=init_latents_slice,
+    overlap_noise=float(args.overlap_noise),
 )
 
 # Unpack result (video + optional latent_slice)
@@ -498,9 +534,21 @@ else:
     video_audio = result
 
 # Save initial latents for this window (post add_noise at t0)
-if args.save_init_latents_path:
-    if 'latent_slice' in locals() and latent_slice is not None:
-        torch.save(latent_slice, args.save_init_latents_path)
+if args.save_init_latents_path and 'latent_slice' in locals() and latent_slice is not None:
+    torch.save(latent_slice, args.save_init_latents_path)
+    print(f"[infer] saved latent_slice to {args.save_init_latents_path}")
+
+# Save adapter tail for next window
+if args.save_adapter_tail_path and args.init_latents_overlap > 0:
+    try:
+        t_head_lat = (int(args.init_latents_overlap) - 1) // 4 + 1
+        t_head_lat = min(t_head_lat, proj_split.shape[1])
+        if t_head_lat > 0:
+            adapter_tail = proj_split[:, -t_head_lat:].detach().cpu()
+            torch.save(adapter_tail, args.save_adapter_tail_path)
+            print(f"[infer] saved adapter_tail to {args.save_adapter_tail_path} shape={tuple(adapter_tail.shape)}")
+    except Exception as e:
+        print(f"[infer] save adapter tail failed: {e}")
 
 now = datetime.now()
 timestamp_str = now.strftime("%Y%m%d_%H%M%S")

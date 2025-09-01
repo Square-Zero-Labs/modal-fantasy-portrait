@@ -629,6 +629,7 @@ class WanVideoPipeline(BasePipeline):
         progress_bar_cmd=tqdm,
         progress_bar_st=None,
         return_tensor=False,
+        overlap_noise: float = 0.0,
         **kwargs,
     ):
         # Parameter check
@@ -698,6 +699,11 @@ class WanVideoPipeline(BasePipeline):
                 w = torch.hann_window(2 * t_head2, periodic=False, device=latents.device, dtype=latents.dtype)[:t_head2]
                 w = w.flip(0).view(1, 1, -1, 1, 1)  # descending 1->0
                 latents[:, :, :t_head2] = prev * w + curr * (1 - w)
+                # Add small noise to reduce blur/ghosting across overlap
+                if overlap_noise and overlap_noise > 0:
+                    nf = float(overlap_noise)
+                    l_ov = latents[:, :, :t_head2]
+                    latents[:, :, :t_head2] = l_ov * (1.0 - nf) + torch.randn_like(l_ov) * nf
 
         # Snapshot initial latents (post init_noise/init_head/init_latents), for latent handoff
         initial_latents_state = latents.clone()

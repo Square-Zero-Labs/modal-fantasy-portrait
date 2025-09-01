@@ -119,7 +119,7 @@ class API:
 
 # --- GPU Model Class ---
 @app.cls(
-    gpu="A100-80GB",
+    gpu="L40S",
     enable_memory_snapshot=True, # new gpu snapshot feature: https://modal.com/blog/gpu-mem-snapshots
     experimental_options={"enable_gpu_snapshot": True},
     image=image,
@@ -336,6 +336,7 @@ class Model:
                 segments = segments[:MAX_WINDOWS]
             print(f"--- Using sliding windows: {segments} ---")
             last_init_latents_path = None
+            last_adapter_tail_path = None
             for idx, (s, l) in enumerate(segments):
                 prev = set(output_dir.glob("*.mp4"))
                 cmd = [
@@ -361,18 +362,22 @@ class Model:
                     "--no_audio_merge",
                     "--noise_path", str(noise_path),
                 ]
-                if idx > 0 and last_init_latents_path:
+                if idx > 0 and last_init_latents_path and last_adapter_tail_path:
                     cmd += [
                         "--warm_video_path", str(segment_paths[-1]),
                         "--warm_overlap", str(OVERLAP),
                         "--init_latents_path", str(last_init_latents_path),
                         "--init_latents_overlap", str(OVERLAP),
+                        "--adapter_tail_path", str(last_adapter_tail_path),
+                        "--overlap_noise", "0.01",
                     ]
                 # Save init latents for next window
                 init_latents_path = output_dir / f"init_lat_{uuid.uuid4().hex}.pt"
+                adapter_tail_path = output_dir / f"adapter_tail_{uuid.uuid4().hex}.pt"
                 cmd += [
                     "--save_init_latents_path", str(init_latents_path),
                     "--init_latents_overlap", str(OVERLAP),
+                    "--save_adapter_tail_path", str(adapter_tail_path),
                 ]
                 label = "warm-start" if idx > 0 else "start"
                 print(f"--- Launching segment ({label}): start={s}, len={l} ---")
@@ -383,6 +388,7 @@ class Model:
                 seg_path = str(max(new, key=lambda p: p.stat().st_mtime))
                 segment_paths.append(seg_path)
                 last_init_latents_path = str(init_latents_path)
+                last_adapter_tail_path = str(adapter_tail_path)
             stitched_path = output_dir / f"stitched_{uuid.uuid4().hex}.mp4"
             final_video_path = concat_no_blend(segment_paths, OVERLAP, int(src_fps), str(stitched_path))
             # Merge original audio onto stitched video
