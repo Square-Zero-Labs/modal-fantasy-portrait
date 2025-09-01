@@ -363,6 +363,7 @@ def load_pd_fgc_model():
 
 
 os.makedirs(args.output_path, exist_ok=True)
+print(f"[infer] start_frame={args.start_frame} num_frames={args.num_frames} max_size={args.max_size}")
 
 # Load models
 pipe = load_wan_video()
@@ -382,6 +383,7 @@ if args.scale_image:
     scale = args.max_size / max(width, height)
     width, height = (int(width * scale), int(height * scale))
     image = image.resize([width, height], Image.LANCZOS)
+print(f"[infer] resized image to {width}x{height}")
 
 init_noise_slice = None
 if args.noise_path is not None:
@@ -390,6 +392,7 @@ if args.noise_path is not None:
     start_lat = int(args.start_frame) // 4
     len_lat = (int(args.num_frames) - 1) // 4 + 1
     init_noise_slice = noise_full[:, :, start_lat : start_lat + len_lat]
+    print(f"[infer] noise: full={tuple(noise_full.shape)} slice_start={start_lat} len_lat={len_lat} slice={tuple(init_noise_slice.shape)}")
 
 init_latents_slice = None
 if args.init_latents_path and args.init_latents_overlap > 0:
@@ -401,6 +404,7 @@ if args.init_latents_path and args.init_latents_overlap > 0:
     overlap_frames = int(args.init_latents_overlap)
     t_head_lat = (overlap_frames - 1) // 4 + 1
     init_latents_slice = init_lat_full[:, :, -t_head_lat:]
+    print(f"[infer] init_latents: full={tuple(init_lat_full.shape)} overlap_frames={overlap_frames} t_head_lat={t_head_lat} slice={tuple(init_latents_slice.shape)}")
 
 with torch.no_grad():
     if args.features_path is not None:
@@ -439,17 +443,24 @@ proj_split, context_lens = portrait_model.split_tensor_with_padding(
 negative_prompt = "人物静止不动，静止，色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
 init_head_video = None
 if args.warm_video_path and args.warm_overlap > 0:
-    # Provide only the overlap head frames for latent warm-start
+    # Provide only the last overlap frames for latent warm-start (tail of previous segment)
     import cv2
     from PIL import Image as PILImage
     cap_w = cv2.VideoCapture(args.warm_video_path)
     warm_frames = []
-    ok, fr = cap_w.read()
-    while ok and len(warm_frames) < int(args.warm_overlap):
-        warm_frames.append(PILImage.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)))
-        ok, fr = cap_w.read()
-    cap_w.release()
-    if len(warm_frames) > 0:
+    try:
+        total = int(cap_w.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        start_idx = max(0, total - int(args.warm_overlap))
+        if start_idx > 0:
+            cap_w.set(cv2.CAP_PROP_POS_FRAMES, start_idx)
+        for _ in range(int(args.warm_overlap)):
+            ok, fr = cap_w.read()
+            if not ok:
+                break
+            warm_frames.append(PILImage.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)))
+    finally:
+        cap_w.release()
+    if warm_frames:
         init_head_video = warm_frames
 
 result = pipe(
@@ -458,7 +469,11 @@ result = pipe(
     input_image=image,
     init_head_video=init_head_video,
     return_latent_slice=bool(args.save_init_latents_path),
-    latent_slice_count=((num_frames - 1) // 4 + 1 if args.init_latents_overlap else None),
+    latent_slice_count=(
+        ((int(args.init_latents_overlap) - 1) // 4 + 1)
+        if args.init_latents_overlap and int(args.init_latents_overlap) > 0
+        else None
+    ),
     width=width,
     height=height,
     num_frames=num_frames,

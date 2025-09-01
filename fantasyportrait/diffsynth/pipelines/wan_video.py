@@ -660,6 +660,7 @@ class WanVideoPipeline(BasePipeline):
         ).to(self.device)
         if init_noise is not None:
             noise = init_noise.to(self.device, dtype=torch.float32)
+        print(f"[pipe] num_frames={num_frames} HxW={height}x{width} noise={tuple(noise.shape)}")
         if input_video is not None:
             self.load_models_to_device(["vae"])
             input_video = self.preprocess_images(input_video)
@@ -697,6 +698,9 @@ class WanVideoPipeline(BasePipeline):
                 w = torch.hann_window(2 * t_head2, periodic=False, device=latents.device, dtype=latents.dtype)[:t_head2]
                 w = w.flip(0).view(1, 1, -1, 1, 1)  # descending 1->0
                 latents[:, :, :t_head2] = prev * w + curr * (1 - w)
+
+        # Snapshot initial latents (post init_noise/init_head/init_latents), for latent handoff
+        initial_latents_state = latents.clone()
 
         # Encode prompts
         self.load_models_to_device(["text_encoder"])
@@ -788,12 +792,12 @@ class WanVideoPipeline(BasePipeline):
 
         # Decode
         self.load_models_to_device(["vae"])
-        # Optionally capture latent tail slice before decode
+        # Optionally capture latent tail slice BEFORE denoise (initial state at t0)
         latent_slice = None
         if return_latent_slice and isinstance(latent_slice_count, int) and latent_slice_count is not None:
             c = max(0, min(latent_slice_count, latents.shape[2]))
             if c > 0:
-                latent_slice = latents[:, :, -c:].detach().to("cpu")
+                latent_slice = initial_latents_state[:, :, -c:].detach().to("cpu")
 
         frames = self.decode_video(latents, **tiler_kwargs)
         self.load_models_to_device([])

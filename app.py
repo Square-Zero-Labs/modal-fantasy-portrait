@@ -370,7 +370,10 @@ class Model:
                     ]
                 # Save init latents for next window
                 init_latents_path = output_dir / f"init_lat_{uuid.uuid4().hex}.pt"
-                cmd += ["--save_init_latents_path", str(init_latents_path)]
+                cmd += [
+                    "--save_init_latents_path", str(init_latents_path),
+                    "--init_latents_overlap", str(OVERLAP),
+                ]
                 label = "warm-start" if idx > 0 else "start"
                 print(f"--- Launching segment ({label}): start={s}, len={l} ---")
                 subprocess.run(cmd, check=True)
