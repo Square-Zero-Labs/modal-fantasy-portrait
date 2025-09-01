@@ -211,6 +211,12 @@ def parse_args():
         help="Denoising strength when using warm video (0..1).",
     )
     parser.add_argument(
+        "--num_inference_steps",
+        type=int,
+        default=24,
+        help="Number of denoising steps (e.g., 24).",
+    )
+    parser.add_argument(
         "--noise_path",
         type=str,
         default=None,
@@ -512,7 +518,7 @@ result = pipe(
     width=width,
     height=height,
     num_frames=num_frames,
-    num_inference_steps=30,
+    num_inference_steps=int(args.num_inference_steps),
     seed=args.seed,
     tiled=True,
     ip_scale=args.portrait_scale,
@@ -532,6 +538,7 @@ if isinstance(result, dict):
     latent_slice = result.get("latent_slice")
 else:
     video_audio = result
+
 
 # Save initial latents for this window (post add_noise at t0)
 if args.save_init_latents_path and 'latent_slice' in locals() and latent_slice is not None:

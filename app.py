@@ -271,8 +271,9 @@ class Model:
         # Sliding window parameters
         WINDOW_LEN = 117
         OVERLAP = 33
+        STEPS = 30
 
-        def run_infer_segment(start_frame: int, seg_len: int) -> str:
+        def run_infer_segment(start_frame: int, seg_len: int, merge_audio: bool = False) -> str:
             prev = set(output_dir.glob("*.mp4"))
             cmd = [
                 "python", "-u", "/root/fantasyportrait/infer.py",
@@ -291,19 +292,26 @@ class Model:
                 # Reduce resolution and frames to lower VRAM usage
                 "--max_size", "480",
                 "--num_frames", str(seg_len),
+                "--num_inference_steps", str(STEPS),
                 "--cfg_scale", "1.0",
                 "--portrait_scale", "1.0",
                 "--portrait_cfg_scale", "4.0",
                 "--seed", "42",
-                "--no_audio_merge",
             ]
+            if not merge_audio:
+                cmd += ["--no_audio_merge"]
             print(f"--- Launching segment: start={start_frame}, len={seg_len} ---")
             subprocess.run(cmd, check=True)
             new = set(output_dir.glob("*.mp4")) - prev
             if not new:
                 raise RuntimeError("Segment generation failed")
-            latest = max(new, key=lambda p: p.stat().st_mtime)
-            return str(latest)
+            # Prefer the with-audio file if infer merged audio
+            with_audio = [p for p in new if p.name.endswith("_with_audio.mp4")]
+            if with_audio:
+                chosen = max(with_audio, key=lambda p: p.stat().st_mtime)
+            else:
+                chosen = max(new, key=lambda p: p.stat().st_mtime)
+            return str(chosen)
 
         segment_paths = []
         if frame_count and frame_count > WINDOW_LEN:
@@ -355,11 +363,12 @@ class Model:
                     "--scale_image", "True",
                     "--max_size", "480",
                     "--num_frames", str(l),
+                    "--num_inference_steps", str(STEPS),
                     "--cfg_scale", "1.0",
                     "--portrait_scale", "1.0",
                     "--portrait_cfg_scale", "4.0",
                     "--seed", "42",
-                    "--no_audio_merge",
+                    "--no_audio_merge",  # avoid merging audio for per-window segments
                     "--noise_path", str(noise_path),
                 ]
                 if idx > 0 and last_init_latents_path and last_adapter_tail_path:
@@ -403,7 +412,8 @@ class Model:
             if seg_len <= 1:
                 seg_len = WINDOW_LEN
             seg_len = seg_len - ((seg_len - 1) % 4)
-            only_path = run_infer_segment(0, seg_len)
+            # Let infer.py handle audio muxing in single-pass runs
+            only_path = run_infer_segment(0, seg_len, merge_audio=True)
             final_video_path = only_path
 
         output_filename = f"fantasyportrait-{uuid.uuid4().hex}.mp4"

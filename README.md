@@ -116,10 +116,10 @@ modal run app.py --image-path "https://storage.googleapis.com/4public-testing-fi
 Longer example (Connie)
 
 ```bash
-modal run app.py --image-path "https://storage.googleapis.com/4public-testing-files4200/connie.png"\
+modal run app.py --image-path "https://storage.googleapis.com/4public-testing-files4200/connie-country-club.png"\
   --driven-video-path "https://storage.googleapis.com/4public-testing-files4200/connie-driving-video-fps25.mp4"\
-  --prompt "The bear is talking"\
-  --output-path outputs/demo.mp4
+  --prompt "The woman is talking"\
+  --output-path outputs/connie-demo.mp4
 ```
 
 ## Resources
