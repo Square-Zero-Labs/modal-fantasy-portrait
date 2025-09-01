@@ -2,66 +2,75 @@
 
 This project deploys the [Fantasy-AMAP/FantasyPortrait](https://github.com/Fantasy-AMAP/fantasy-portrait) model on [Modal](https://modal.com), providing a high-performance API for animating portrait images with driving videos.
 
-The deployment uses L40S GPUs and caches model files in Modal volumes for efficient inference.
+The deployment caches model files in Modal volumes for efficient inference.
 
 ## Prerequisites
 
-1. **Create a Modal Account:** Sign up at [modal.com](https://modal.com).
-2. **Install Modal Client:**
+1. **Clone this Repository:**
+
    ```bash
-   pip install modal
-   modal token new
+   git clone https://github.com/Square-Zero-Labs/modal-fantasy-portrait
+   cd modal-fantasy-portrait
    ```
 
-## Setup
+2. **Create a Modal Account:** Sign up at [modal.com](https://modal.com).
 
-The FantasyPortrait code is included via a `git subtree`:
-
-```bash
-git subtree add --prefix fantasyportrait https://github.com/Fantasy-AMAP/fantasy-portrait main --squash
-```
-
-To update the subtree:
+3. **Install Modal Client:**
 
 ```bash
-git subtree pull --prefix fantasyportrait https://github.com/Fantasy-AMAP/fantasy-portrait main --squash
+pip install modal
+modal setup
 ```
-
-On first run the app downloads required models and stores them in the `fantasyportrait-models` volume:
-
-- [Wan2.1-I2V-14B-720P base model](https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-720P)
-- [FantasyPortrait expression weights](https://huggingface.co/acvlab/FantasyPortrait)
-- `face_landmark.onnx`, `face_det.onnx`, `pd_fpg.pth`
 
 ## Deployment
 
+Deploy the web endpoint:
+
+```bash
+pip install pydantic
+modal deploy app.py
+```
+
+Modal builds a container image and exposes an API for inference.
 Two Modal volumes are used:
 
 - `fantasyportrait-models` for cached model files
 - `fantasyportrait-outputs` for generated videos
 
-Deploy the web endpoint:
+## Usage
+
+### Local Testing CLI
 
 ```bash
-modal deploy app.py
+modal run app.py --image-path "https://example.com/portrait.jpg"\
+  --driven-video-path "https://example.com/driving-video.mp4"\
+  --prompt "The person is talking"\
+  --output-path outputs/demo.mp4
 ```
 
-Modal builds a container image, downloads the models, and exposes an API for inference.
+**Note:** On first run, the app automatically downloads required models and stores them in the `fantasyportrait-models` volume:
+
+- [Wan2.1-I2V-14B-720P base model](https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-720P)
+- [FantasyPortrait expression weights](https://huggingface.co/acvlab/FantasyPortrait)
+
+### Using the API
+
+First, you'll need to set up authentication.
 
 ## Authentication
 
 The API requires proxy authentication tokens.
 
-To create proxy auth tokens, go to your Modal workspace settings and generate a new token. Set the token ID and secret as environment variables:
+To create proxy auth tokens, go to your Modal workspace settings and generate a new proxy auth token. Set the token ID and secret as environment variables:
 
 ```bash
 export TOKEN_ID="your-token-id"
 export TOKEN_SECRET="your-token-secret"
 ```
 
-## Usage
+## Making API Calls
 
-### 1. Web API Endpoint
+### Submit a Request
 
 Send a `POST` request with proxy authentication. The JSON payload accepts:
 
@@ -102,17 +111,26 @@ curl -X GET \
   "https://<username>--fantasyportrait-api-api-result.modal.run?call_id=$CALL_ID"
 ```
 
-### 2. Local Testing CLI
-
-```bash
-modal run app.py --image-path "https://storage.googleapis.com/4public-testing-files4200/teddy-bear-smiling-small.png"\
-  --driven-video-path "https://storage.googleapis.com/4public-testing-files4200/breakfast-club-with-driving-video.mp4"\
-  --prompt "The bear is talking"\
-  --output-path outputs/demo.mp4
-```
-
 ## Resources
 
+- [Video Tutorial](https://youtu.be/UdiiEXZV-10)
 - [FantasyPortrait Paper](https://arxiv.org/abs/2507.12956)
-- [FantasyPortrait Dataset](https://huggingface.co/datasets/acvlab/FantasyPortrait-Multi-Expr)
-- [Model Weights](https://huggingface.co/acvlab/FantasyPortrait)
+- [FantasyPortrait Repo](https://github.com/Fantasy-AMAP/fantasy-portrait)
+
+## Development Notes
+
+The FantasyPortrait code is included via a `git subtree`:
+
+### Git Subtree Management
+
+When originally added:
+
+```bash
+git subtree add --prefix fantasyportrait https://github.com/Fantasy-AMAP/fantasy-portrait main --squash
+```
+
+To update the subtree:
+
+```bash
+git subtree pull --prefix fantasyportrait https://github.com/Fantasy-AMAP/fantasy-portrait main --squash
+```

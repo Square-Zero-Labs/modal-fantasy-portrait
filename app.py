@@ -1,7 +1,6 @@
 import modal
 import os
 import time
-from pathlib import Path
 from pydantic import BaseModel
 
 
