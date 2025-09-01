@@ -44,11 +44,6 @@ def get_emo_feature(
         ret, frame = cap.read()
     cap.release()
 
-    # Apply sliding window start
-    start = max(0, int(args.start_frame)) if hasattr(args, "start_frame") else 0
-    if start > 0:
-        frame_list = frame_list[start:]
-
     num_frames = min(len(frame_list), args.num_frames)
     num_frames = find_replacement(num_frames)
     frame_list = frame_list[:num_frames]
@@ -187,72 +182,6 @@ def parse_args():
         help="The number of frames.",
     )
     parser.add_argument(
-        "--features_path",
-        type=str,
-        default=None,
-        help="Path to precomputed features npz (head_emo_feat_all, fps).",
-    )
-    parser.add_argument(
-        "--warm_video_path",
-        type=str,
-        default=None,
-        help="Optional video to warm-start overlap from (previous segment tail).",
-    )
-    parser.add_argument(
-        "--warm_overlap",
-        type=int,
-        default=0,
-        help="Number of warm-start frames from warm_video_path to use at head.",
-    )
-    parser.add_argument(
-        "--denoising_strength",
-        type=float,
-        default=1.0,
-        help="Denoising strength when using warm video (0..1).",
-    )
-    parser.add_argument(
-        "--noise_path",
-        type=str,
-        default=None,
-        help="Optional path to precomputed global noise tensor (.pt) to slice per window.",
-    )
-    parser.add_argument(
-        "--init_latents_path",
-        type=str,
-        default=None,
-        help="Optional path to previous window's initial latents (.pt) for overlap handoff.",
-    )
-    parser.add_argument(
-        "--init_latents_overlap",
-        type=int,
-        default=0,
-        help="Number of head frames to override from init_latents_path.",
-    )
-    parser.add_argument(
-        "--save_init_latents_path",
-        type=str,
-        default=None,
-        help="If set, saves this window's initial latents (post add_noise) to the given .pt path.",
-    )
-    parser.add_argument(
-        "--adapter_tail_path",
-        type=str,
-        default=None,
-        help="Optional path to previous window's adapter tail (.pt) for overlap blending.",
-    )
-    parser.add_argument(
-        "--save_adapter_tail_path",
-        type=str,
-        default=None,
-        help="If set, saves this window's adapter tail (last overlap latents) to the given .pt path.",
-    )
-    parser.add_argument(
-        "--overlap_noise",
-        type=float,
-        default=0.0,
-        help="Noise factor (0..1e-1) to inject into overlap latents to reduce blur.",
-    )
-    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -278,25 +207,6 @@ def parse_args():
         default=None,
         required=True,
         help="The driven video path.",
-    )
-    parser.add_argument(
-        "--no_audio_merge",
-        action="store_true",
-        help="Skip merging audio (useful for segmented generation).",
-    )
-    parser.add_argument(
-        "--start_frame",
-        type=int,
-        default=0,
-        required=False,
-        help="Start frame index for sliding window (0-based).",
-    )
-    parser.add_argument(
-        "--fps",
-        type=int,
-        default=None,
-        required=False,
-        help="Override output FPS (e.g., 25).",
     )
 
     args = parser.parse_args()
@@ -381,7 +291,6 @@ def load_pd_fgc_model():
 
 
 os.makedirs(args.output_path, exist_ok=True)
-print(f"[infer] start_frame={args.start_frame} num_frames={args.num_frames} max_size={args.max_size}")
 
 # Load models
 pipe = load_wan_video()
@@ -401,54 +310,14 @@ if args.scale_image:
     scale = args.max_size / max(width, height)
     width, height = (int(width * scale), int(height * scale))
     image = image.resize([width, height], Image.LANCZOS)
-print(f"[infer] resized image to {width}x{height}")
-
-init_noise_slice = None
-if args.noise_path is not None:
-    # Load full noise and slice by latent indices for this window
-    noise_full = torch.load(args.noise_path, map_location="cpu")  # [1,16,T_lat,H/8,W/8]
-    start_lat = int(args.start_frame) // 4
-    len_lat = (int(args.num_frames) - 1) // 4 + 1
-    init_noise_slice = noise_full[:, :, start_lat : start_lat + len_lat]
-    print(f"[infer] noise: full={tuple(noise_full.shape)} slice_start={start_lat} len_lat={len_lat} slice={tuple(init_noise_slice.shape)}")
-
-init_latents_slice = None
-if args.init_latents_path and args.init_latents_overlap > 0:
-    init_lat_full = torch.load(args.init_latents_path, map_location="cpu")  # expected [1,16,T_lat,H/8,W/8]
-    # Ensure 5D shape (B,C,T,H,W)
-    if init_lat_full.dim() == 4:
-        init_lat_full = init_lat_full.unsqueeze(0)
-    # Convert overlap in frames to overlap in latent timesteps
-    overlap_frames = int(args.init_latents_overlap)
-    t_head_lat = (overlap_frames - 1) // 4 + 1
-    init_latents_slice = init_lat_full[:, :, -t_head_lat:]
-    print(f"[infer] init_latents: full={tuple(init_lat_full.shape)} overlap_frames={overlap_frames} t_head_lat={t_head_lat} slice={tuple(init_latents_slice.shape)}")
 
 with torch.no_grad():
-    if args.features_path is not None:
-        import numpy as np
-        data = np.load(args.features_path)
-        head_emo_feat_all_np = data["head_emo_feat_all"]  # [T_saved, C]
-        fps = float(data.get("fps", 25.0))
-        saved_start = int(data.get("start_frame", 0))
-        # Map absolute indices to the saved range
-        abs_start = max(0, int(args.start_frame))
-        rel_start = max(0, abs_start - saved_start)
-        rel_end = rel_start + int(args.num_frames)
-        # Bounds check
-        if rel_start < 0 or rel_start >= head_emo_feat_all_np.shape[0]:
-            raise ValueError(
-                f"features_path does not cover requested start_frame: saved_start={saved_start}, "
-                f"requested_start={abs_start}, available={head_emo_feat_all_np.shape[0]} frames"
-            )
-        rel_end = min(rel_end, head_emo_feat_all_np.shape[0])
-        head_emo_feat_all = torch.from_numpy(head_emo_feat_all_np[rel_start:rel_end]).to(torch.float32)
-        num_frames = head_emo_feat_all.shape[0]
-    else:
-        emo_feat_all, head_emo_feat_all, fps, num_frames = get_emo_feature(
-            args.driven_video_path, face_aligner, pd_fpg_motion
-        )
-head_emo_feat_all = head_emo_feat_all.unsqueeze(0)
+    emo_feat_all, head_emo_feat_all, fps, num_frames = get_emo_feature(
+        args.driven_video_path, face_aligner, pd_fpg_motion
+    )
+emo_feat_all, head_emo_feat_all = emo_feat_all.unsqueeze(
+    0
+), head_emo_feat_all.unsqueeze(0)
 
 adapter_proj = portrait_model.get_adapter_proj(head_emo_feat_all.to(device))
 pos_idx_range = portrait_model.split_audio_adapter_sequence(
@@ -458,57 +327,11 @@ proj_split, context_lens = portrait_model.split_tensor_with_padding(
     adapter_proj, pos_idx_range, expand_length=0
 )
 
-# Blend adapter tail from previous window, if provided
-if args.adapter_tail_path and args.init_latents_overlap > 0:
-    try:
-        prev_adapter_tail = torch.load(args.adapter_tail_path, map_location="cpu")  # expected [1, T_lat_tail, L, C]
-        if prev_adapter_tail.dim() == 3:
-            prev_adapter_tail = prev_adapter_tail.unsqueeze(0)
-        t_head_lat = (int(args.init_latents_overlap) - 1) // 4 + 1
-        t_head_lat = min(t_head_lat, proj_split.shape[1], prev_adapter_tail.shape[1])
-        if t_head_lat > 0:
-            w = torch.hann_window(2 * t_head_lat, periodic=False)[:t_head_lat].flip(0).view(1, t_head_lat, 1, 1)
-            curr_head = proj_split[:, :t_head_lat].cpu()
-            blended = prev_adapter_tail[:, -t_head_lat:] * w + curr_head * (1 - w)
-            proj_split[:, :t_head_lat] = blended.to(proj_split.device, dtype=proj_split.dtype)
-            print(f"[infer] adapter blend: prev_tail={tuple(prev_adapter_tail.shape)} head={tuple(curr_head.shape)} t_head_lat={t_head_lat}")
-    except Exception as e:
-        print(f"[infer] adapter blend skipped: {e}")
-
 negative_prompt = "人物静止不动，静止，色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
-init_head_video = None
-if args.warm_video_path and args.warm_overlap > 0:
-    # Provide only the last overlap frames for latent warm-start (tail of previous segment)
-    import cv2
-    from PIL import Image as PILImage
-    cap_w = cv2.VideoCapture(args.warm_video_path)
-    warm_frames = []
-    try:
-        total = int(cap_w.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        start_idx = max(0, total - int(args.warm_overlap))
-        if start_idx > 0:
-            cap_w.set(cv2.CAP_PROP_POS_FRAMES, start_idx)
-        for _ in range(int(args.warm_overlap)):
-            ok, fr = cap_w.read()
-            if not ok:
-                break
-            warm_frames.append(PILImage.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)))
-    finally:
-        cap_w.release()
-    if warm_frames:
-        init_head_video = warm_frames
-
-result = pipe(
+video_audio = pipe(
     prompt=args.prompt,
     negative_prompt=negative_prompt,
     input_image=image,
-    init_head_video=init_head_video,
-    return_latent_slice=bool(args.save_init_latents_path),
-    latent_slice_count=(
-        ((int(args.init_latents_overlap) - 1) // 4 + 1)
-        if args.init_latents_overlap and int(args.init_latents_overlap) > 0
-        else None
-    ),
     width=width,
     height=height,
     num_frames=num_frames,
@@ -521,60 +344,7 @@ result = pipe(
     adapter_proj=proj_split,
     adapter_context_lens=context_lens,
     latents_num_frames=(num_frames - 1) // 4 + 1,
-    init_noise=init_noise_slice,
-    init_latents=init_latents_slice,
-    overlap_noise=float(args.overlap_noise),
 )
-
-# Unpack result (video + optional latent_slice)
-if isinstance(result, dict):
-    video_audio = result.get("video")
-    latent_slice = result.get("latent_slice")
-else:
-    video_audio = result
-
-# Save initial latents for this window (post add_noise at t0)
-if args.save_init_latents_path and 'latent_slice' in locals() and latent_slice is not None:
-    torch.save(latent_slice, args.save_init_latents_path)
-    print(f"[infer] saved latent_slice to {args.save_init_latents_path}")
-
-# Save adapter tail for next window
-if args.save_adapter_tail_path and args.init_latents_overlap > 0:
-    try:
-        t_head_lat = (int(args.init_latents_overlap) - 1) // 4 + 1
-        t_head_lat = min(t_head_lat, proj_split.shape[1])
-        if t_head_lat > 0:
-            adapter_tail = proj_split[:, -t_head_lat:].detach().cpu()
-            torch.save(adapter_tail, args.save_adapter_tail_path)
-            print(f"[infer] saved adapter_tail to {args.save_adapter_tail_path} shape={tuple(adapter_tail.shape)}")
-    except Exception as e:
-        print(f"[infer] save adapter tail failed: {e}")
-
-# Color correction on first overlap frames to match previous segment tail
-try:
-    cc_frames = int(args.init_latents_overlap) if args.init_latents_overlap else 0
-    if 'warm_frames' in locals() and warm_frames and cc_frames > 0 and isinstance(video_audio, list) and len(video_audio) > 0:
-        import numpy as _np
-        from PIL import Image as _PIL
-        ref = warm_frames[-1]
-        ref_np = _np.array(ref).astype(_np.float32)
-        ref_mean = ref_np.reshape(-1, 3).mean(axis=0)
-        ref_std = ref_np.reshape(-1, 3).std(axis=0) + 1e-6
-        for i in range(min(cc_frames, len(video_audio))):
-            alpha = 1.0 - (i / max(1, cc_frames - 1))
-            cur_np = _np.array(video_audio[i]).astype(_np.float32)
-            cur_mean = cur_np.reshape(-1, 3).mean(axis=0)
-            cur_std = cur_np.reshape(-1, 3).std(axis=0) + 1e-6
-            scale = (ref_std / cur_std)
-            shift = (ref_mean - cur_mean * scale)
-            corr = cur_np * scale + shift
-            corr = _np.clip(corr, 0, 255)
-            blended = corr * alpha + cur_np * (1.0 - alpha)
-            blended = _np.clip(blended, 0, 255).astype(_np.uint8)
-            video_audio[i] = _PIL.fromarray(blended)
-        print(f"[infer] color-corrected first {min(cc_frames, len(video_audio))} frames to match previous tail")
-except Exception as e:
-    print(f"[infer] color correction skipped: {e}")
 
 now = datetime.now()
 timestamp_str = now.strftime("%Y%m%d_%H%M%S")
@@ -588,16 +358,14 @@ save_video_name = (
 )
 save_name = f"{timestamp_str}_{save_image_name}_{save_video_name}"
 save_video_path = os.path.join(args.output_path, f"{save_name}.mp4")
-out_fps = args.fps if hasattr(args, "fps") and args.fps is not None else fps
 save_video(
-    video_audio, os.path.join(args.output_path, f"{save_name}.mp4"), fps=out_fps, quality=5
+    video_audio, os.path.join(args.output_path, f"{save_name}.mp4"), fps=fps, quality=5
 )
 
-# add Driven Audio to the Result video unless disabled for segment runs.
+# add Driven Audio to the Result video.
 save_video_path_with_audio = os.path.join(
     args.output_path, f"{save_name}_with_audio.mp4"
 )
-if not hasattr(args, "no_audio_merge") or not args.no_audio_merge:
-    merge_audio_to_video(
-        args.driven_video_path, save_video_path, save_video_path_with_audio
-    )
+merge_audio_to_video(
+    args.driven_video_path, save_video_path, save_video_path_with_audio
+)

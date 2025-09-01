@@ -608,11 +608,6 @@ class WanVideoPipeline(BasePipeline):
         negative_prompt="",
         input_image=None,
         input_video=None,
-        init_head_video=None,  # list of PIL images for warm-starting the head overlap only
-        init_noise=None,       # optional precomputed noise for this window (global continuity)
-        init_latents=None,     # optional initial latents for head overlap (true handoff)
-        return_latent_slice: bool = False,
-        latent_slice_count: int | None = None,
         denoising_strength=1.0,
         seed=None,
         rand_device="cpu",
@@ -629,7 +624,6 @@ class WanVideoPipeline(BasePipeline):
         progress_bar_cmd=tqdm,
         progress_bar_st=None,
         return_tensor=False,
-        overlap_noise: float = 0.0,
         **kwargs,
     ):
         # Parameter check
@@ -652,16 +646,13 @@ class WanVideoPipeline(BasePipeline):
             num_inference_steps, denoising_strength, shift=sigma_shift
         )
 
-        # Initialize noise (allow override for global continuity)
+        # Initialize noise
         noise = self.generate_noise(
             (1, 16, (num_frames - 1) // 4 + 1, height // 8, width // 8),
             seed=seed,
             device=rand_device,
             dtype=torch.float32,
         ).to(self.device)
-        if init_noise is not None:
-            noise = init_noise.to(self.device, dtype=torch.float32)
-        print(f"[pipe] num_frames={num_frames} HxW={height}x{width} noise={tuple(noise.shape)}")
         if input_video is not None:
             self.load_models_to_device(["vae"])
             input_video = self.preprocess_images(input_video)
@@ -674,39 +665,6 @@ class WanVideoPipeline(BasePipeline):
             )
         else:
             latents = noise
-
-        # Optional warm-start for head overlap only via init_head_video
-        if init_head_video is not None and isinstance(init_head_video, list) and len(init_head_video) > 0:
-            self.load_models_to_device(["vae"])
-            head_imgs = self.preprocess_images(init_head_video)
-            head_imgs = torch.stack(head_imgs, dim=2)  # [B=1, C, T_head, H, W]
-            head_latents = self.encode_video(head_imgs, **tiler_kwargs).to(dtype=latents.dtype, device=latents.device)
-            # Add the same initial noise timestep to head latents for consistency
-            t0 = self.scheduler.timesteps[0]
-            # Use the corresponding slice of the initial noise for the head window
-            head_noise = noise[:, :, : head_latents.shape[2]]
-            head_latents = self.scheduler.add_noise(head_latents, head_noise, timestep=t0)
-            t_head = head_latents.shape[2]
-            latents[:, :, :t_head] = head_latents
-
-        # Optional: override head latents directly (true latent handoff)
-        if init_latents is not None:
-            # Blend previous tail latents into current head using a Hann window to avoid snaps
-            t_head2 = min(init_latents.shape[2], latents.shape[2])
-            if t_head2 > 0:
-                prev = init_latents.to(device=latents.device, dtype=latents.dtype)[:, :, :t_head2]
-                curr = latents[:, :, :t_head2]
-                w = torch.hann_window(2 * t_head2, periodic=False, device=latents.device, dtype=latents.dtype)[:t_head2]
-                w = w.flip(0).view(1, 1, -1, 1, 1)  # descending 1->0
-                latents[:, :, :t_head2] = prev * w + curr * (1 - w)
-                # Add small noise to reduce blur/ghosting across overlap
-                if overlap_noise and overlap_noise > 0:
-                    nf = float(overlap_noise)
-                    l_ov = latents[:, :, :t_head2]
-                    latents[:, :, :t_head2] = l_ov * (1.0 - nf) + torch.randn_like(l_ov) * nf
-
-        # Snapshot initial latents (post init_noise/init_head/init_latents), for latent handoff
-        initial_latents_state = latents.clone()
 
         # Encode prompts
         self.load_models_to_device(["text_encoder"])
@@ -798,19 +756,11 @@ class WanVideoPipeline(BasePipeline):
 
         # Decode
         self.load_models_to_device(["vae"])
-        # Optionally capture latent tail slice BEFORE denoise (initial state at t0)
-        latent_slice = None
-        if return_latent_slice and isinstance(latent_slice_count, int) and latent_slice_count is not None:
-            c = max(0, min(latent_slice_count, latents.shape[2]))
-            if c > 0:
-                latent_slice = initial_latents_state[:, :, -c:].detach().to("cpu")
-
         frames = self.decode_video(latents, **tiler_kwargs)
         self.load_models_to_device([])
         return_frames = self.tensor2video(frames[0])
 
         if return_tensor:
             return return_frames, frames
-        if return_latent_slice and latent_slice is not None:
-            return {"video": return_frames, "latent_slice": latent_slice}
+
         return return_frames

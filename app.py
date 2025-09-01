@@ -119,7 +119,7 @@ class API:
 
 # --- GPU Model Class ---
 @app.cls(
-    gpu="L40S",
+    gpu="A100-80GB",
     enable_memory_snapshot=True, # new gpu snapshot feature: https://modal.com/blog/gpu-mem-snapshots
     experimental_options={"enable_gpu_snapshot": True},
     image=image,
@@ -245,7 +245,7 @@ class Model:
         output_dir = Path(OUTPUT_DIR)
         prev_files = set(output_dir.glob("*.mp4"))
 
-        # Determine frame count from the driven video
+        # Determine frame count from the driven video, capped at 250
         try:
             import cv2
             cap = cv2.VideoCapture(driven_video_path)
@@ -253,174 +253,54 @@ class Model:
             cap.release()
         except Exception:
             frame_count = 0
-        print(f"--- Driven video frames detected: {frame_count} ---")
+        # Cap frames to keep VRAM in check; README multi example uses ~201 frames
+        max_frames = 250
+        requested_frames = frame_count if frame_count and frame_count > 0 else max_frames
+        requested_frames = min(requested_frames, max_frames)
+        print(f"--- Driven video frames detected: {frame_count} -> using {requested_frames} ---")
 
-        # Detect source FPS to propagate into segments/stitching (keeps A/V in sync)
-        src_fps = 0
+        cmd = [
+            "python", "-u", "/root/fantasyportrait/infer.py",
+            "--portrait_checkpoint", str(model_root / "fantasyportrait_model.ckpt"),
+            "--alignment_model_path", str(model_root / "face_landmark.onnx"),
+            "--det_model_path", str(model_root / "face_det.onnx"),
+            "--pd_fpg_model_path", str(model_root / "pd_fpg.pth"),
+            "--wan_model_path", str(model_root / "Wan2.1-I2V-14B-720P"),
+            "--output_path", str(output_dir),
+            "--input_image_path", image_path,
+            "--driven_video_path", driven_video_path,
+            "--prompt", prompt or "",
+            "--scale_image", "True",
+            # Reduce resolution and frames to lower VRAM usage
+            "--max_size", "480",
+            "--num_frames", str(requested_frames),
+            "--cfg_scale", "1.0",
+            "--portrait_scale", "1.0",
+            "--portrait_cfg_scale", "4.0",
+            "--seed", "42",
+        ]
         try:
-            import cv2 as _cv
-            _cap = _cv.VideoCapture(driven_video_path)
-            src_fps = float(_cap.get(_cv.CAP_PROP_FPS) or 0)
-            _cap.release()
-        except Exception:
-            src_fps = 0
-        if not src_fps or src_fps != src_fps:  # NaN or 0
-            src_fps = 25.0
-        print(f"--- Source FPS detected: {src_fps} ---")
-
-        # Sliding window parameters
-        WINDOW_LEN = 117
-        OVERLAP = 33
-
-        def run_infer_segment(start_frame: int, seg_len: int) -> str:
-            prev = set(output_dir.glob("*.mp4"))
-            cmd = [
-                "python", "-u", "/root/fantasyportrait/infer.py",
-                "--portrait_checkpoint", str(model_root / "fantasyportrait_model.ckpt"),
-                "--alignment_model_path", str(model_root / "face_landmark.onnx"),
-                "--det_model_path", str(model_root / "face_det.onnx"),
-                "--pd_fpg_model_path", str(model_root / "pd_fpg.pth"),
-                "--wan_model_path", str(model_root / "Wan2.1-I2V-14B-720P"),
-                "--output_path", str(output_dir),
-                "--input_image_path", image_path,
-                "--driven_video_path", driven_video_path,
-                "--fps", str(int(src_fps)),
-                "--start_frame", str(start_frame),
-                "--prompt", prompt or "",
-                "--scale_image", "True",
-                # Reduce resolution and frames to lower VRAM usage
-                "--max_size", "480",
-                "--num_frames", str(seg_len),
-                "--cfg_scale", "1.0",
-                "--portrait_scale", "1.0",
-                "--portrait_cfg_scale", "4.0",
-                "--seed", "42",
-                "--no_audio_merge",
-            ]
-            print(f"--- Launching segment: start={start_frame}, len={seg_len} ---")
+            print("--- Launching infer.py (streaming logs) ---")
+            # Stream logs live so progress is visible during long runs
             subprocess.run(cmd, check=True)
-            new = set(output_dir.glob("*.mp4")) - prev
-            if not new:
-                raise RuntimeError("Segment generation failed")
-            latest = max(new, key=lambda p: p.stat().st_mtime)
-            return str(latest)
+        except subprocess.CalledProcessError as e:
+            print("--- infer.py failed ---")
+            print("See live logs above for details.")
+            raise RuntimeError(
+                f"infer.py failed with exit code {e.returncode}. See logs above."
+            )
 
-        segment_paths = []
-        if frame_count and frame_count > WINDOW_LEN:
-            from fantasyportrait.sliding_window import compute_segments, concat_no_blend
-            segments = compute_segments(frame_count, WINDOW_LEN, OVERLAP)
-            # Determine coverage range for noise generation across segments
-            if segments:
-                pre_start = segments[0][0]
-                pre_end = segments[-1][0] + segments[-1][1]
-            else:
-                pre_start, pre_end = 0, frame_count
-            # Precompute global noise for continuity and slice per window
-            from PIL import Image as _PILImage
-            src_img = _PILImage.open(image_path).convert("RGB")
-            w0, h0 = src_img.size
-            scale = 480 / max(w0, h0)
-            w = int(w0 * scale)
-            h = int(h0 * scale)
-            last_end = pre_end
-            import torch as _torch
-            gen = _torch.Generator().manual_seed(42)
-            T_lat = (int(last_end) - 1) // 4 + 1
-            noise_full = _torch.randn((1, 16, T_lat, h // 8, w // 8), generator=gen, dtype=_torch.float32)
-            noise_path = output_dir / f"noise_{uuid.uuid4().hex}.pt"
-            _torch.save(noise_full, str(noise_path))
-            # Enforce a maximum number of windows to bound runtime
-            MAX_WINDOWS = 3
-            if len(segments) > MAX_WINDOWS:
-                print(f"--- Too many windows ({len(segments)}). Limiting to first {MAX_WINDOWS}. ---")
-                segments = segments[:MAX_WINDOWS]
-            print(f"--- Using sliding windows: {segments} ---")
-            last_init_latents_path = None
-            last_adapter_tail_path = None
-            for idx, (s, l) in enumerate(segments):
-                prev = set(output_dir.glob("*.mp4"))
-                cmd = [
-                    "python", "-u", "/root/fantasyportrait/infer.py",
-                    "--portrait_checkpoint", str(model_root / "fantasyportrait_model.ckpt"),
-                    "--alignment_model_path", str(model_root / "face_landmark.onnx"),
-                    "--det_model_path", str(model_root / "face_det.onnx"),
-                    "--pd_fpg_model_path", str(model_root / "pd_fpg.pth"),
-                    "--wan_model_path", str(model_root / "Wan2.1-I2V-14B-720P"),
-                    "--output_path", str(output_dir),
-                    "--input_image_path", image_path,
-                    "--driven_video_path", driven_video_path,
-                    "--fps", str(int(src_fps)),
-                    "--start_frame", str(s),
-                    "--prompt", prompt or "",
-                    "--scale_image", "True",
-                    "--max_size", "480",
-                    "--num_frames", str(l),
-                    "--cfg_scale", "1.0",
-                    "--portrait_scale", "1.0",
-                    "--portrait_cfg_scale", "4.0",
-                    "--seed", "42",
-                    "--no_audio_merge",
-                    "--noise_path", str(noise_path),
-                ]
-                if idx > 0 and last_init_latents_path and last_adapter_tail_path:
-                    cmd += [
-                        "--warm_video_path", str(segment_paths[-1]),
-                        "--warm_overlap", str(OVERLAP),
-                        "--init_latents_path", str(last_init_latents_path),
-                        "--init_latents_overlap", str(OVERLAP),
-                        "--adapter_tail_path", str(last_adapter_tail_path),
-                        # range from 0.01 to 0.03
-                        "--overlap_noise", "0.02",
-                    ]
-                # Save init latents for next window
-                init_latents_path = output_dir / f"init_lat_{uuid.uuid4().hex}.pt"
-                adapter_tail_path = output_dir / f"adapter_tail_{uuid.uuid4().hex}.pt"
-                cmd += [
-                    "--save_init_latents_path", str(init_latents_path),
-                    "--init_latents_overlap", str(OVERLAP),
-                    "--save_adapter_tail_path", str(adapter_tail_path),
-                ]
-                label = "warm-start" if idx > 0 else "start"
-                print(f"--- Launching segment ({label}): start={s}, len={l} ---")
-                subprocess.run(cmd, check=True)
-                new = set(output_dir.glob("*.mp4")) - prev
-                if not new:
-                    raise RuntimeError("Segment generation failed")
-                seg_path = str(max(new, key=lambda p: p.stat().st_mtime))
-                segment_paths.append(seg_path)
-                last_init_latents_path = str(init_latents_path)
-                last_adapter_tail_path = str(adapter_tail_path)
-            stitched_path = output_dir / f"stitched_{uuid.uuid4().hex}.mp4"
-            final_video_path = concat_no_blend(segment_paths, OVERLAP, int(src_fps), str(stitched_path))
-            # Merge original audio onto stitched video
-            from fantasyportrait.sliding_window import merge_audio_to_video
-            save_video_path_with_audio = output_dir / f"stitched_{uuid.uuid4().hex}_with_audio.mp4"
-            merge_audio_to_video(driven_video_path, final_video_path, str(save_video_path_with_audio))
-            final_video_path = str(save_video_path_with_audio)
-        else:
-            # Single pass (round down to valid length)
-            seg_len = frame_count if frame_count and frame_count > 0 else WINDOW_LEN
-            if seg_len <= 1:
-                seg_len = WINDOW_LEN
-            seg_len = seg_len - ((seg_len - 1) % 4)
-            only_path = run_infer_segment(0, seg_len)
-            final_video_path = only_path
-
+        new_files = set(output_dir.glob("*.mp4")) - prev_files
+        if not new_files:
+            raise RuntimeError("Video generation failed")
+        latest = max(new_files, key=lambda p: p.stat().st_mtime)
         output_filename = f"fantasyportrait-{uuid.uuid4().hex}.mp4"
         final_path = output_dir / output_filename
-        os.rename(str(final_video_path), final_path)
+        os.rename(latest, final_path)
         output_volume.commit()
 
-        # Cleanup temps
-        try:
-            os.unlink(image_path)
-        except Exception:
-            pass
-        try:
-            os.unlink(driven_video_path)
-        except Exception:
-            pass
-        # Keep intermediate segment and stitched files for debugging (no cleanup)
+        os.unlink(image_path)
+        os.unlink(driven_video_path)
         print(f"--- Generation complete in {time.time()-t0:.2f}s ---")
         return output_filename
     @modal.fastapi_endpoint(method="POST", requires_proxy_auth=True)
