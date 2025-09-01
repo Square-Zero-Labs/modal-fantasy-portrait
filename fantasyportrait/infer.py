@@ -550,6 +550,32 @@ if args.save_adapter_tail_path and args.init_latents_overlap > 0:
     except Exception as e:
         print(f"[infer] save adapter tail failed: {e}")
 
+# Color correction on first overlap frames to match previous segment tail
+try:
+    cc_frames = int(args.init_latents_overlap) if args.init_latents_overlap else 0
+    if 'warm_frames' in locals() and warm_frames and cc_frames > 0 and isinstance(video_audio, list) and len(video_audio) > 0:
+        import numpy as _np
+        from PIL import Image as _PIL
+        ref = warm_frames[-1]
+        ref_np = _np.array(ref).astype(_np.float32)
+        ref_mean = ref_np.reshape(-1, 3).mean(axis=0)
+        ref_std = ref_np.reshape(-1, 3).std(axis=0) + 1e-6
+        for i in range(min(cc_frames, len(video_audio))):
+            alpha = 1.0 - (i / max(1, cc_frames - 1))
+            cur_np = _np.array(video_audio[i]).astype(_np.float32)
+            cur_mean = cur_np.reshape(-1, 3).mean(axis=0)
+            cur_std = cur_np.reshape(-1, 3).std(axis=0) + 1e-6
+            scale = (ref_std / cur_std)
+            shift = (ref_mean - cur_mean * scale)
+            corr = cur_np * scale + shift
+            corr = _np.clip(corr, 0, 255)
+            blended = corr * alpha + cur_np * (1.0 - alpha)
+            blended = _np.clip(blended, 0, 255).astype(_np.uint8)
+            video_audio[i] = _PIL.fromarray(blended)
+        print(f"[infer] color-corrected first {min(cc_frames, len(video_audio))} frames to match previous tail")
+except Exception as e:
+    print(f"[infer] color correction skipped: {e}")
+
 now = datetime.now()
 timestamp_str = now.strftime("%Y%m%d_%H%M%S")
 

@@ -369,7 +369,8 @@ class Model:
                         "--init_latents_path", str(last_init_latents_path),
                         "--init_latents_overlap", str(OVERLAP),
                         "--adapter_tail_path", str(last_adapter_tail_path),
-                        "--overlap_noise", "0.01",
+                        # range from 0.01 to 0.03
+                        "--overlap_noise", "0.02",
                     ]
                 # Save init latents for next window
                 init_latents_path = output_dir / f"init_lat_{uuid.uuid4().hex}.pt"
